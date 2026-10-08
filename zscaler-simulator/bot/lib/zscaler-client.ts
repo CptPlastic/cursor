@@ -127,22 +127,22 @@ function asJson(value: unknown): JsonValue {
   return null;
 }
 
-function clip(data: unknown, secret: string): { data: JsonValue; truncated: boolean } {
+function clip(data: unknown, secret: string, limit: number): { data: JsonValue; truncated: boolean } {
   let text: string;
   try {
     text = JSON.stringify(data) ?? "null";
   } catch {
     return { data: null, truncated: false };
   }
-  text = text.split(secret).join("[redacted]");
-  if (text.length <= BODY_LIMIT) {
+  if (secret !== "") text = text.split(secret).join("[redacted]");
+  if (text.length <= limit) {
     try {
       return { data: asJson(JSON.parse(text) as unknown), truncated: false };
     } catch {
       return { data: { preview: text.slice(0, 500) }, truncated: false };
     }
   }
-  return { data: { preview: text.slice(0, BODY_LIMIT) }, truncated: true };
+  return { data: { preview: text.slice(0, limit) }, truncated: true };
 }
 
 async function accessToken(config: ZscalerConfig): Promise<string> {
@@ -181,7 +181,12 @@ async function accessToken(config: ZscalerConfig): Promise<string> {
   return token;
 }
 
-function requestFor(config: ZscalerConfig, operation: ZscalerOperation, urls: string[] | undefined): { url: string; method: "GET" | "POST"; body?: string } {
+function requestFor(
+  config: ZscalerConfig,
+  operation: ZscalerOperation,
+  urls: string[] | undefined,
+  page: number,
+): { url: string; method: "GET" | "POST"; body?: string } {
   const origin = apiOrigin(config.cloud);
   if (operation === "zia.urlLookup") {
     return { url: `${origin}/zia/api/v1/urlLookup`, method: "POST", body: JSON.stringify(urls ?? []) };
@@ -200,10 +205,13 @@ function requestFor(config: ZscalerConfig, operation: ZscalerOperation, urls: st
   }
   const customerId = config.customerId;
   if (operation === "zpa.listApplicationSegments") {
-    return { url: `${origin}/zpa/mgmtconfig/v1/admin/customers/${customerId}/application`, method: "GET" };
+    return {
+      url: `${origin}/zpa/mgmtconfig/v1/admin/customers/${customerId}/application?page=${page}&pagesize=500`,
+      method: "GET",
+    };
   }
   return {
-    url: `${origin}/zpa/mgmtconfig/v1/admin/customers/${customerId}/policySet/rules?policyType=ACCESS_POLICY`,
+    url: `${origin}/zpa/mgmtconfig/v1/admin/customers/${customerId}/policySet/rules/policyType/ACCESS_POLICY?page=${page}&pagesize=500`,
     method: "GET",
   };
 }
@@ -212,6 +220,8 @@ export async function callZscaler(
   env: NodeJS.ProcessEnv,
   operation: ZscalerOperation,
   urls?: string[],
+  outputLimit = BODY_LIMIT,
+  page = 1,
 ): Promise<ZscalerCallResult> {
   const loaded = loadConfig(env);
   if (!loaded.ok) {
@@ -237,7 +247,7 @@ export async function callZscaler(
     };
   }
   try {
-    const request = requestFor(loaded.config, operation, urls);
+    const request = requestFor(loaded.config, operation, urls, page);
     assertOfficial(request.url);
     const token = await accessToken(loaded.config);
     const response = await fetch(request.url, {
@@ -260,7 +270,7 @@ export async function callZscaler(
         data = { preview: redacted.slice(0, 500) };
       }
     }
-    const clipped = clip(data, loaded.config.clientSecret);
+    const clipped = clip(data, loaded.config.clientSecret, outputLimit);
     if (!response.ok) {
       return {
         configured: true,
@@ -293,4 +303,68 @@ export async function callZscaler(
       error: message.split(loaded.config.clientSecret).join("[redacted]"),
     };
   }
+}
+
+function resultList(data: JsonValue): JsonValue[] {
+  if (Array.isArray(data)) return data;
+  if (data === null || typeof data !== "object") return [];
+  for (const key of ["list", "items", "data", "results"]) {
+    const value = data[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function pageCount(data: JsonValue): number {
+  if (data === null || Array.isArray(data) || typeof data !== "object") return 1;
+  const raw = data.totalPages ?? data.total_pages;
+  const parsed = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : 1;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
+}
+
+export async function callZscalerPaginated(
+  env: NodeJS.ProcessEnv,
+  operation: "zpa.listApplicationSegments" | "zpa.listAccessPolicyRules",
+  outputLimit = 2_000_000,
+  maxPages = 10,
+): Promise<ZscalerCallResult> {
+  const first = await callZscaler(env, operation, undefined, outputLimit, 1);
+  if (!first.ok) return first;
+  const totalPages = pageCount(first.data);
+  const combined = [...resultList(first.data)];
+  let truncated = first.truncated;
+  let fetchedPages = 1;
+  let warning: string | null = null;
+
+  for (let page = 2; page <= Math.min(totalPages, maxPages); page += 1) {
+    const result = await callZscaler(env, operation, undefined, outputLimit, page);
+    if (!result.ok) {
+      warning = `Stopped on page ${page}: ${result.error ?? `HTTP ${result.status ?? "error"}`}`;
+      break;
+    }
+    fetchedPages = page;
+    combined.push(...resultList(result.data));
+    truncated ||= result.truncated;
+    if (result.truncated) {
+      warning = `Page ${page} exceeded the integration read limit.`;
+      break;
+    }
+  }
+  if (warning === null && totalPages > maxPages) {
+    warning = `Stopped after ${maxPages} pages; tenant reported ${totalPages}.`;
+  }
+  const merged = clip({
+    list: combined,
+    totalPages,
+    fetchedPages,
+  }, "", outputLimit);
+  return {
+    configured: first.configured,
+    operation,
+    ok: true,
+    status: first.status,
+    data: merged.data,
+    truncated: truncated || merged.truncated,
+    error: warning,
+  };
 }

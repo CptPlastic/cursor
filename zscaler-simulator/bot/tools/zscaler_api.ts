@@ -1,7 +1,12 @@
 import { defineTool } from "@cursor/bdk/tools";
 import { z } from "zod";
 import { hostFromInput } from "../lib/policy.js";
-import { callZscaler, type ZscalerCallResult, type ZscalerOperation } from "../lib/zscaler-client.js";
+import {
+  callZscaler,
+  callZscalerPaginated,
+  type ZscalerCallResult,
+  type ZscalerOperation,
+} from "../lib/zscaler-client.js";
 
 const operations = [
   "zia.urlLookup",
@@ -29,6 +34,9 @@ export default defineTool({
         hosts.push(host);
       }
       return callZscaler(process.env, operation, hosts);
+    }
+    if (operation === "zpa.listApplicationSegments" || operation === "zpa.listAccessPolicyRules") {
+      return callZscalerPaginated(process.env, operation, 80_000);
     }
     return callZscaler(process.env, operation);
   },

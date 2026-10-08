@@ -33,5 +33,15 @@ export default defineEval({
         t.check(t.reply, includes(/BLOCK/));
       },
     },
+    {
+      id: "map-zpa-integration",
+      description: "An integrator can map app segments to policies.",
+      async test(t) {
+        await t.send("Show me how the mock ZPA app segments map to access policies.");
+        t.succeeded();
+        t.calledTool("build_zpa_integration_map");
+        t.check(t.reply, includes(/Payroll|Finance can use payroll/));
+      },
+    },
   ],
 });
