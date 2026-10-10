@@ -1,0 +1,18 @@
+{
+  "name": "zscaler-simulator",
+  "private": true,
+  "type": "module",
+  "description": "ZIA, ZPA, and DLP policy simulator with read-only Zscaler OneAPI access.",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "dev": "bdk dev"
+  },
+  "dependencies": {
+    "@cursor/bdk": "^0.2.22",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "6.0.3"
+  }
+}
